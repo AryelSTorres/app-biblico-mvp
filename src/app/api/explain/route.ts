@@ -1,60 +1,58 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+import { explainWord } from '@/lib/ai-service';
+import { supabase } from '@/lib/supabase';
 
 export async function POST(request: NextRequest) {
   try {
     const { word, context, testament } = await request.json();
 
-    const language = testament === 'old' ? 'hebraico' : 'grego';
-    const prompt = `Você é um especialista em línguas bíblicas originais (hebraico e grego).
+    if (!word || !testament) {
+      return NextResponse.json(
+        { error: 'Parâmetros inválidos' },
+        { status: 400 }
+      );
+    }
 
-Analise a palavra "${word}" no seguinte contexto bíblico:
-"${context}"
+    // Verificar cache primeiro
+    const { data: cached, error: cacheError } = await supabase
+      .from('word_cache')
+      .select('*')
+      .eq('word', word.toLowerCase())
+      .eq('testament', testament)
+      .single();
 
-Forneça uma explicação detalhada em português brasileiro sobre:
-1. A palavra original em ${language}
-2. Transliteração da palavra original
-3. Significado literal da palavra
-4. Contexto teológico e cultural
-5. Como essa palavra é usada em outras passagens bíblicas
+    if (cached && !cacheError) {
+      console.log('✅ Cache hit para palavra:', word);
+      return NextResponse.json({
+        originalText: cached.original_text,
+        explanation: cached.explanation,
+      });
+    }
 
-Retorne a resposta em formato JSON com a seguinte estrutura:
-{
-  "word": "palavra em português",
-  "original": "palavra original em ${language}",
-  "transliteration": "transliteração",
-  "meaning": "significado literal",
-  "context": "contexto teológico e cultural",
-  "usage": "uso em outras passagens"
-}`;
+    console.log('🔍 Buscando explicação para:', word);
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [
-        {
-          role: 'system',
-          content: 'Você é um especialista em línguas bíblicas originais e teologia.',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.7,
-    });
+    // Buscar explicação da IA
+    const result = await explainWord(word, context || '', testament);
 
-    const explanation = JSON.parse(completion.choices[0].message.content || '{}');
+    // Salvar no cache
+    try {
+      await supabase.from('word_cache').insert({
+        word: word.toLowerCase(),
+        testament,
+        original_text: result.originalText,
+        explanation: result.explanation,
+      });
+      console.log('💾 Salvo no cache:', word);
+    } catch (cacheInsertError) {
+      console.error('⚠️ Erro ao salvar cache:', cacheInsertError);
+      // Continuar mesmo se falhar ao salvar no cache
+    }
 
-    return NextResponse.json(explanation);
-  } catch (error) {
-    console.error('Erro ao gerar explicação:', error);
+    return NextResponse.json(result);
+  } catch (error: any) {
+    console.error('❌ Erro ao explicar palavra:', error);
     return NextResponse.json(
-      { error: 'Erro ao gerar explicação' },
+      { error: error.message || 'Erro ao processar solicitação' },
       { status: 500 }
     );
   }
